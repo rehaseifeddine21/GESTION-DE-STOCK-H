@@ -150,19 +150,20 @@ class AppConstants:
     @staticmethod
     def calculate_stamp_duty(amount):
         try:
-            val = float(amount)
+            val = Decimal(str(amount))
         except:
             return 0.0
-        if val <= 300:
+        if val <= Decimal('300.00'):
             return 0.0
-        units = math.ceil(val / 100.0)
-        if val <= 30000:
-            duty = units * 1.0
-        elif val <= 100000:
-            duty = units * 1.5
+        val_float = float(val)
+        if val_float <= 30000:
+            duty = val_float * 0.01
+        elif val_float <= 100000:
+            duty = val_float * 0.015
         else:
-            duty = units * 2.0
-        return float(max(5.0, math.ceil(duty)))
+            duty = val_float * 0.02
+        final_duty = Decimal(str(max(5.0, duty))).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+        return float(final_duty)
 
 def to_decimal(value, default='0.00'):
     if value is None or value == '':
@@ -183,6 +184,63 @@ def format_number_simple(num):
         return '{:,.2f}'.format(d).replace(',', ' ').replace('.', ',')
     except:
         return '0,00'
+
+def calculate_document_totals(items, global_discount=Decimal('0.00'), fidelity_discount=Decimal('0.00'), include_stamp_duty=False, payment_method=''):
+    total_gross_ht = Decimal('0.00')
+    total_ht_net_of_lines = Decimal('0.00')
+    total_tva_brut_raw = Decimal('0.00')
+    total_item_discounts = Decimal('0.00')
+    item_count_real = 0
+    items_iterable = items.values() if isinstance(items, dict) else items
+    for item in items_iterable:
+        if not item.get('is_virtual', False):
+            item_count_real += 1
+        price = to_decimal(item.get('price', 0))
+        qty = to_decimal(item.get('qty', item.get('quantity', 0)))
+        tva_percent = to_decimal(item.get('tva', 0))
+        disc_amt = to_decimal(item.get('discount_amount', '0'))
+        discount_type = item.get('discount_type', 'fixed')
+        line_gross = price * qty
+        total_gross_ht += line_gross
+        unit_discount = disc_amt if discount_type == 'fixed' else price * (disc_amt / Decimal('100'))
+        line_item_discount = unit_discount * abs(qty)
+        total_item_discounts += line_item_discount
+        price_after_disc = price - unit_discount
+        line_net = price_after_disc * qty
+        total_ht_net_of_lines += line_net
+        line_tva = line_net * (tva_percent / Decimal('100'))
+        total_tva_brut_raw += line_tva
+    total_global_discount = global_discount + fidelity_discount
+    abs_ht_net = abs(total_ht_net_of_lines)
+    if total_global_discount > abs_ht_net:
+        total_global_discount = abs_ht_net
+    if abs_ht_net > Decimal('0'):
+        discount_ratio = total_global_discount / abs_ht_net
+    else:
+        discount_ratio = Decimal('0')
+    total_tva_final = (total_tva_brut_raw * (Decimal('1') - discount_ratio)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    total_ht_final = total_ht_net_of_lines.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    total_all_discounts_final = (total_item_discounts + total_global_discount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    if total_ht_net_of_lines < Decimal('0'):
+        net_to_pay = total_ht_final + total_global_discount + total_tva_final
+    else:
+        net_to_pay = total_ht_final - total_global_discount + total_tva_final
+    stamp_duty = Decimal('0.00')
+    show_stamp_duty_widget = False
+    cash_methods = ['دفع نقدًا', 'Espèce', 'espece', 'Espèces', 'نقد']
+    if include_stamp_duty and any((m.lower() in str(payment_method).lower() for m in cash_methods)):
+        show_stamp_duty_widget = True
+        val = float(net_to_pay)
+        if val > 300:
+            if val <= 30000:
+                duty = val * 0.01
+            elif val <= 100000:
+                duty = val * 0.015
+            else:
+                duty = val * 0.02
+            stamp_duty = to_decimal(max(5.0, duty)).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)
+    final_total = net_to_pay + stamp_duty
+    return {'item_count_real': item_count_real, 'total_gross_ht': total_gross_ht, 'total_ht_net_of_lines': total_ht_net_of_lines, 'total_tva_brut_raw': total_tva_brut_raw, 'total_item_discounts': total_item_discounts, 'global_discount': global_discount, 'fidelity_discount': fidelity_discount, 'total_global_discount': total_global_discount, 'total_tva_final': total_tva_final, 'total_ht_final': total_ht_final, 'total_all_discounts_final': total_all_discounts_final, 'net_to_pay': net_to_pay, 'stamp_duty': stamp_duty, 'show_stamp_duty_widget': show_stamp_duty_widget, 'final_total': final_total}
 
 def format_warranty_days_fr(days):
     if not isinstance(days, int) or days <= 0:
@@ -686,14 +744,13 @@ class DatabaseManager:
             cursor.execute('\n                CREATE TABLE IF NOT EXISTS users (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    username TEXT UNIQUE,\n                    password_hash TEXT,\n                    role TEXT\n                )\n            ')
             cursor.execute('\n                CREATE TABLE IF NOT EXISTS product_families (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    name TEXT UNIQUE\n                )\n            ')
             cursor.execute("INSERT OR IGNORE INTO product_families (name) VALUES ('TOUS')")
-            cursor.execute('\n                CREATE TABLE IF NOT EXISTS products (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    name TEXT,\n                    barcode TEXT,\n                    price REAL,\n                    stock REAL,\n                    category TEXT,\n                    family TEXT DEFAULT "TOUS",\n                    product_ref TEXT,\n                    image_path TEXT,\n                    reference TEXT,\n                    purchase_price REAL DEFAULT 0,\n                    price_semi REAL DEFAULT 0,\n                    price_wholesale REAL DEFAULT 0,\n                    is_used INTEGER DEFAULT 0,\n                    stock_warehouse REAL DEFAULT 0,\n                    is_promo_active INTEGER DEFAULT 0,\n                    promo_type TEXT DEFAULT "fixed",\n                    promo_value REAL DEFAULT 0,\n                    promo_qty_limit REAL DEFAULT 0,\n                    promo_expiry TEXT DEFAULT ""\n                )\n            ')
-            cursor.execute('\n                CREATE TABLE IF NOT EXISTS suppliers (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    name TEXT,\n                    phone TEXT,\n                    balance REAL DEFAULT 0,\n                    address TEXT,\n                    email TEXT,\n                    activity TEXT,\n                    rc TEXT,\n                    nif TEXT,\n                    nis TEXT,\n                    nai TEXT,\n                    price_category TEXT,\n                    gps_location TEXT DEFAULT ""\n                )\n            ')
-            cursor.execute('\n                CREATE TABLE IF NOT EXISTS clients (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    name TEXT,\n                    phone TEXT,\n                    balance REAL DEFAULT 0,\n                    address TEXT,\n                    email TEXT,\n                    activity TEXT,\n                    rc TEXT,\n                    nif TEXT,\n                    nis TEXT,\n                    nai TEXT,\n                    price_category TEXT,\n                    gps_location TEXT DEFAULT ""\n                )\n            ')
-            cursor.execute("\n                CREATE TABLE IF NOT EXISTS transactions (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    transaction_type TEXT,\n                    entity_category TEXT, \n                    client_name TEXT,\n                    total_amount REAL,\n                    discount REAL DEFAULT 0,\n                    date TIMESTAMP,\n                    entity_id INTEGER,\n                    custom_label TEXT,\n                    user_name TEXT,\n                    note TEXT,\n                    payment_details TEXT,\n                    location TEXT DEFAULT 'store' \n                )\n            ")
-            cursor.execute('\n                CREATE TABLE IF NOT EXISTS transaction_items (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    transaction_id INTEGER,\n                    product_id INTEGER,\n                    product_name TEXT,\n                    qty REAL,\n                    price REAL,\n                    cost_price REAL DEFAULT 0,\n                    tva REAL DEFAULT 0,\n                    is_return INTEGER DEFAULT 0,\n                    FOREIGN KEY(transaction_id) REFERENCES transactions(id)\n                )\n            ')
+            cursor.execute('\n                CREATE TABLE IF NOT EXISTS products (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    name TEXT, barcode TEXT, price REAL, stock REAL, category TEXT,\n                    family TEXT DEFAULT "TOUS", product_ref TEXT, image_path TEXT,\n                    reference TEXT, purchase_price REAL DEFAULT 0, price_semi REAL DEFAULT 0,\n                    price_wholesale REAL DEFAULT 0, is_used INTEGER DEFAULT 0,\n                    stock_warehouse REAL DEFAULT 0, is_promo_active INTEGER DEFAULT 0,\n                    promo_type TEXT DEFAULT "fixed", promo_value REAL DEFAULT 0,\n                    promo_qty_limit REAL DEFAULT 0, promo_expiry TEXT DEFAULT ""\n                )\n            ')
+            cursor.execute('\n                CREATE TABLE IF NOT EXISTS suppliers (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    name TEXT, phone TEXT, balance REAL DEFAULT 0, address TEXT,\n                    email TEXT, activity TEXT, rc TEXT, nif TEXT, nis TEXT, nai TEXT,\n                    price_category TEXT, gps_location TEXT DEFAULT ""\n                )\n            ')
+            cursor.execute('\n                CREATE TABLE IF NOT EXISTS clients (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    name TEXT, phone TEXT, balance REAL DEFAULT 0, address TEXT,\n                    email TEXT, activity TEXT, rc TEXT, nif TEXT, nis TEXT, nai TEXT,\n                    price_category TEXT, gps_location TEXT DEFAULT ""\n                )\n            ')
+            cursor.execute("\n                CREATE TABLE IF NOT EXISTS transactions (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    transaction_type TEXT, entity_category TEXT, client_name TEXT,\n                    total_amount REAL, discount REAL DEFAULT 0, date TIMESTAMP,\n                    entity_id INTEGER, custom_label TEXT, user_name TEXT, note TEXT,\n                    payment_details TEXT, location TEXT DEFAULT 'store' \n                )\n            ")
+            cursor.execute('\n                CREATE TABLE IF NOT EXISTS transaction_items (\n                    id INTEGER PRIMARY KEY AUTOINCREMENT,\n                    transaction_id INTEGER, product_id INTEGER, product_name TEXT,\n                    qty REAL, price REAL, cost_price REAL DEFAULT 0, tva REAL DEFAULT 0,\n                    is_return INTEGER DEFAULT 0,\n                    FOREIGN KEY(transaction_id) REFERENCES transactions(id)\n                )\n            ')
             cursor.execute('\n                CREATE TABLE IF NOT EXISTS app_settings (\n                    key TEXT PRIMARY KEY,\n                    value TEXT\n                )\n            ')
-            cursor.execute('\n                CREATE TABLE IF NOT EXISTS local_stats (\n                    date TEXT PRIMARY KEY,\n                    sales REAL DEFAULT 0,\n                    purchases REAL DEFAULT 0,\n                    c_pay REAL DEFAULT 0,\n                    s_pay REAL DEFAULT 0\n                )\n            ')
-            cursor.execute('\n                CREATE TABLE IF NOT EXISTS document_sequences (\n                    name TEXT PRIMARY KEY, \n                    current_value INTEGER DEFAULT 0\n                )\n            ')
+            cursor.execute('\n                CREATE TABLE IF NOT EXISTS local_stats (\n                    date TEXT PRIMARY KEY,\n                    sales REAL DEFAULT 0, purchases REAL DEFAULT 0,\n                    c_pay REAL DEFAULT 0, s_pay REAL DEFAULT 0\n                )\n            ')
             conn.commit()
         finally:
             conn.close()
@@ -720,53 +777,6 @@ class DatabaseManager:
         stats = {'sales': Decimal('0.00'), 'purchases': Decimal('0.00'), 'profit': Decimal('0.00'), 'cash_in': Decimal('0.00'), 'cash_out': Decimal('0.00'), 'stock_value': Decimal('0.00')}
         try:
             cursor = conn.cursor()
-            cursor.execute('\n                SELECT transaction_type, total_amount, payment_details \n                FROM transactions \n                WHERE date(date) = date(?)\n            ', (date_str,))
-            rows = cursor.fetchall()
-            for row in rows:
-                t_type = str(row[0]).upper()
-                total = to_decimal(row[1])
-                paid = Decimal('0.00')
-                try:
-                    pd = json.loads(row[2]) if row[2] else {}
-                    paid = to_decimal(pd.get('amount', 0))
-                except:
-                    paid = Decimal('0.00')
-                s_factor = AppConstants.STOCK_MOVEMENTS.get(t_type, 0)
-                f_factor = AppConstants.FINANCIAL_FACTORS.get(t_type, 0)
-                if s_factor == -1 and f_factor == 1:
-                    stats['sales'] += total
-                    if paid > 0:
-                        stats['cash_in'] += paid
-                elif s_factor == 1 and f_factor == -1:
-                    stats['sales'] -= total
-                    if paid > 0:
-                        stats['cash_out'] += paid
-                elif s_factor == 1 and f_factor == 1:
-                    stats['purchases'] += total
-                    if paid > 0:
-                        stats['cash_out'] += paid
-                elif s_factor == -1 and f_factor == -1:
-                    stats['purchases'] -= total
-                    if paid > 0:
-                        stats['cash_in'] += paid
-                elif t_type in ['CLIENT_PAY', 'VERSEMENT']:
-                    stats['cash_in'] += total
-                elif t_type in ['SUPPLIER_PAY', 'REGLEMENT']:
-                    stats['cash_out'] += total
-            cursor.execute('\n                SELECT t.transaction_type, ti.qty, ti.price, ti.cost_price\n                FROM transaction_items ti\n                JOIN transactions t ON ti.transaction_id = t.id\n                WHERE date(t.date) = date(?)\n            ', (date_str,))
-            item_rows = cursor.fetchall()
-            for i_row in item_rows:
-                t_type = str(i_row[0]).upper()
-                qty = to_decimal(i_row[1])
-                sell_price = to_decimal(i_row[2])
-                hist_cost = to_decimal(i_row[3])
-                s_factor = AppConstants.STOCK_MOVEMENTS.get(t_type, 0)
-                f_factor = AppConstants.FINANCIAL_FACTORS.get(t_type, 0)
-                margin = (sell_price - hist_cost) * qty
-                if s_factor == -1 and f_factor == 1:
-                    stats['profit'] += margin
-                elif s_factor == 1 and f_factor == -1:
-                    stats['profit'] -= margin
             cursor.execute('SELECT stock, stock_warehouse, purchase_price FROM products')
             stock_rows = cursor.fetchall()
             for p in stock_rows:
@@ -776,8 +786,67 @@ class DatabaseManager:
                 total_qty = s_store + s_wh
                 if total_qty > 0:
                     stats['stock_value'] += total_qty * cost
+            cursor.execute('\n                SELECT id, transaction_type, total_amount, discount, payment_details \n                FROM transactions \n                WHERE date(date) = date(?)\n            ', (date_str,))
+            transactions = cursor.fetchall()
+            for trans in transactions:
+                t_id = trans[0]
+                t_type = str(trans[1]).upper()
+                db_total_amount = to_decimal(trans[2])
+                g_discount = to_decimal(trans[3] if trans[3] is not None else 0)
+                paid = Decimal('0.00')
+                pm = ''
+                try:
+                    import json
+                    pd = json.loads(trans[4]) if trans[4] else {}
+                    paid = to_decimal(pd.get('amount', 0))
+                    pm = pd.get('method', '')
+                except:
+                    pass
+                cursor.execute('\n                    SELECT qty, price, tva, cost_price \n                    FROM transaction_items \n                    WHERE transaction_id = ?\n                ', (t_id,))
+                items_rows = cursor.fetchall()
+                dummy_cart = {}
+                total_cost = Decimal('0.00')
+                for idx, item in enumerate(items_rows):
+                    qty = to_decimal(item[0])
+                    price = to_decimal(item[1])
+                    tva = to_decimal(item[2])
+                    cost_price = to_decimal(item[3])
+                    dummy_cart[idx] = {'qty': qty, 'price': price, 'tva': tva}
+                    total_cost += qty * cost_price
+                if items_rows:
+                    is_facture = t_type in ['FC', 'FF']
+                    calc_result = calculate_document_totals(dummy_cart, global_discount=g_discount, include_stamp_duty=is_facture, payment_method=pm)
+                    final_total = calc_result['final_total']
+                    net_ht = calc_result['total_ht_final']
+                else:
+                    final_total = db_total_amount
+                    net_ht = Decimal('0.00')
+                s_factor = AppConstants.STOCK_MOVEMENTS.get(t_type, 0)
+                f_factor = AppConstants.FINANCIAL_FACTORS.get(t_type, 0)
+                if s_factor == -1 and f_factor == 1:
+                    stats['sales'] += final_total
+                    stats['profit'] += net_ht - total_cost
+                    if paid > 0:
+                        stats['cash_in'] += paid
+                elif s_factor == 1 and f_factor == -1:
+                    stats['sales'] -= final_total
+                    stats['profit'] -= net_ht - total_cost
+                    if paid > 0:
+                        stats['cash_out'] += paid
+                elif s_factor == 1 and f_factor == 1:
+                    stats['purchases'] += final_total
+                    if paid > 0:
+                        stats['cash_out'] += paid
+                elif s_factor == -1 and f_factor == -1:
+                    stats['purchases'] -= final_total
+                    if paid > 0:
+                        stats['cash_in'] += paid
+                elif t_type in ['CLIENT_PAY', 'VERSEMENT']:
+                    stats['cash_in'] += final_total
+                elif t_type in ['SUPPLIER_PAY', 'REGLEMENT']:
+                    stats['cash_out'] += final_total
         except Exception as e:
-            print(f'Stats Calculation Error: {e}')
+            print(f'Stats Unified Engine Error: {e}')
         finally:
             conn.close()
         return {k: float(quantize_decimal(v)) for k, v in stats.items()}
@@ -852,34 +921,70 @@ class DatabaseManager:
         finally:
             conn.close()
 
-    def get_next_sequence_value(self, seq_name):
+    def get_next_transfer_number(self):
+        from datetime import datetime
+        now = datetime.now()
+        date_part = now.strftime('%d%m')
         conn = self.get_connection()
         try:
             cursor = conn.cursor()
-            cursor.execute('SELECT current_value FROM document_sequences WHERE name = ?', (seq_name,))
-            row = cursor.fetchone()
-            if row:
-                next_val = row[0] + 1
-                cursor.execute('UPDATE document_sequences SET current_value = ? WHERE name = ?', (next_val, seq_name))
-            else:
-                next_val = 1
-                cursor.execute('INSERT INTO document_sequences (name, current_value) VALUES (?, ?)', (seq_name, next_val))
-            conn.commit()
-            return next_val
+            query = f"SELECT custom_label FROM transactions WHERE transaction_type IN ('TR', 'TRANSFER') AND custom_label LIKE 'TR%/{date_part}'"
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            max_val = 0
+            for r in rows:
+                if r[0]:
+                    try:
+                        clean_str = str(r[0]).upper().replace('TR', '')
+                        if '/' in clean_str:
+                            num_part = clean_str.split('/')[0]
+                            if num_part.isdigit():
+                                val = int(num_part)
+                                if val > max_val:
+                                    max_val = val
+                    except:
+                        pass
+            next_val = max_val + 1
+            return f'TR{next_val:05d}/{date_part}'
+        except Exception as e:
+            return f'TR00001/{date_part}'
         finally:
             conn.close()
 
     def get_invoice_number(self, doc_type):
-        is_yearly = doc_type in AppConstants.YEARLY_RESET_SEQUENCES
-        year = datetime.now().year
-        if is_yearly:
-            seq_name = f'SEQ_{doc_type}_{year}'
-            date_part = str(year)
+        from datetime import datetime
+        yearly_types = ('FC', 'FP', 'DP', 'FF')
+        now = datetime.now()
+        if doc_type in yearly_types:
+            suffix = now.strftime('%Y')
         else:
-            seq_name = f'SEQ_{doc_type}'
-            date_part = datetime.now().strftime('%d%m')
-        next_val = self.get_next_sequence_value(seq_name)
-        return f'{doc_type}{next_val:05d}/{date_part}'
+            suffix = now.strftime('%d%m')
+        conn = self.get_connection()
+        try:
+            cursor = conn.cursor()
+            query = f"SELECT custom_label FROM transactions WHERE custom_label LIKE '{doc_type}%/{suffix}'"
+            cursor.execute(query)
+            rows = cursor.fetchall()
+            max_val = 0
+            for r in rows:
+                if r[0]:
+                    try:
+                        clean_str = str(r[0]).upper().replace(doc_type, '')
+                        if '/' in clean_str:
+                            num_part = clean_str.split('/')[0]
+                            if num_part.isdigit():
+                                val = int(num_part)
+                                if val > max_val:
+                                    max_val = val
+                    except:
+                        pass
+            next_val = max_val + 1
+            return f'{doc_type}{next_val:05d}/{suffix}'
+        except Exception as e:
+            print(f'Error generating invoice number for {doc_type}: {e}')
+            return f'{doc_type}00001/{suffix}'
+        finally:
+            conn.close()
 
     def check_product_has_movements(self, product_id):
         if not product_id:
@@ -1248,23 +1353,52 @@ class DatabaseManager:
             cat = trans.get('entity_category')
             if not cat:
                 cat = AppConstants.get_entity_type(t_type)
-            cursor.execute('SELECT product_id, qty FROM transaction_items WHERE transaction_id=?', (t_id,))
+            cursor.execute('SELECT product_id, qty, price FROM transaction_items WHERE transaction_id=?', (t_id,))
+            items = cursor.fetchall()
             s_factor = AppConstants.STOCK_MOVEMENTS.get(t_type, 0)
             loc = trans.get('location', 'store')
             col = 'stock_warehouse' if loc == 'warehouse' else 'stock'
-            for item in cursor.fetchall():
-                if item['product_id'] and item['product_id'] != -999:
-                    revert_qty = float(item['qty']) * (s_factor * -1)
-                    cursor.execute(f'UPDATE products SET {col} = {col} + ? WHERE id = ?', (revert_qty, item['product_id']))
+            is_purchase_op = t_type in ['BA', 'FF', 'PURCHASE', 'INVOICE_PURCHASE', 'BI']
+            for item in items:
+                p_id = item['product_id']
+                if p_id and p_id != -999:
+                    qty = float(item['qty'])
+                    revert_qty = qty * (s_factor * -1)
+                    if is_purchase_op:
+                        trans_price = float(item['price'])
+                        cursor.execute('SELECT stock, stock_warehouse, purchase_price FROM products WHERE id=?', (p_id,))
+                        prod_row = cursor.fetchone()
+                        if prod_row:
+                            current_store = float(prod_row[0] or 0)
+                            current_wh = float(prod_row[1] or 0)
+                            current_pmp = float(prod_row[2] or 0)
+                            total_current_stock = current_store + current_wh
+                            old_stock = total_current_stock - qty
+                            if old_stock > 0:
+                                old_pmp_total = total_current_stock * current_pmp - qty * trans_price
+                                new_pmp = old_pmp_total / old_stock
+                                if new_pmp < 0:
+                                    new_pmp = 0.0
+                            else:
+                                new_pmp = current_pmp
+                            cursor.execute(f'UPDATE products SET {col} = ROUND({col} + ?, 3), purchase_price = ROUND(?, 2) WHERE id = ?', (revert_qty, new_pmp, p_id))
+                    else:
+                        cursor.execute(f'UPDATE products SET {col} = ROUND({col} + ?, 3) WHERE id = ?', (revert_qty, p_id))
             if ent_id:
                 f_factor = AppConstants.FINANCIAL_FACTORS.get(t_type, 0)
+                import json
                 try:
                     paid = float(json.loads(trans['payment_details']).get('amount', 0))
                 except:
                     paid = 0.0
-                impact = total * f_factor - paid
+                if f_factor == -1 and s_factor != 0:
+                    impact = total * -1 + paid
+                elif f_factor == -1 and s_factor == 0:
+                    impact = -total
+                else:
+                    impact = total * f_factor - paid
                 table = 'suppliers' if cat == 'supplier' else 'clients'
-                cursor.execute(f'UPDATE {table} SET balance = balance - ? WHERE id = ?', (impact, ent_id))
+                cursor.execute(f'UPDATE {table} SET balance = ROUND(balance - ?, 2) WHERE id = ?', (impact, ent_id))
             cursor.execute('DELETE FROM transaction_items WHERE transaction_id=?', (t_id,))
             cursor.execute('DELETE FROM transactions WHERE id=?', (t_id,))
             conn.commit()
@@ -2752,15 +2886,11 @@ class StockApp(MDApp):
             saved_cat = AppConstants.get_entity_type(doc_type_raw)
         is_supplier = saved_cat == 'supplier'
         is_transfer = doc_type_raw in ['TR', 'TRANSFER', 'TRANSFERT']
-        if 'TR' in ref_text.upper() and (not is_transfer):
-            is_transfer = True
         items = transaction_data.get('items', [])
         stored_total_amount = to_decimal(transaction_data.get('amount', transaction_data.get('total_amount', 0)))
         is_simple = False
         if not is_transfer:
-            if transaction_data.get('is_simple_payment'):
-                is_simple = True
-            if doc_type_raw in ['CLIENT_PAY', 'SUPPLIER_PAY', 'VERSEMENT', 'REGLEMENT']:
+            if transaction_data.get('is_simple_payment') or doc_type_raw in ['CLIENT_PAY', 'SUPPLIER_PAY', 'VERSEMENT', 'REGLEMENT']:
                 is_simple = True
             if not items and abs(stored_total_amount) > 0:
                 is_simple = True
@@ -2829,11 +2959,9 @@ class StockApp(MDApp):
             y += 20
             draw.line([(margin + 100, y), (PAPER_WIDTH - margin - 100, y)], fill=(0, 0, 0), width=1)
             y += 15
-            y = draw_text_line('Merci de votre Fidélité !', y, font_med, 'center')
+            y = draw_text_line('Merci de votre Fidélité.', y, font_med, 'center')
             y += 120
             return image.crop((0, 0, PAPER_WIDTH, y))
-        calc_total_ht = Decimal(0)
-        calc_total_tva = Decimal(0)
         for item in items:
             raw_prod = item.get('name') or item.get('product_name') or 'Article'
             qty = to_decimal(item.get('qty', 0))
@@ -2852,8 +2980,6 @@ class StockApp(MDApp):
             price_str = f'{price:,.2f}'
             line_ht = qty * price
             line_tva = line_ht * (tva_rate / Decimal(100))
-            calc_total_ht += line_ht
-            calc_total_tva += line_tva
             line_ttc = line_ht + line_tva
             if tva_rate > 0:
                 line_calc = f'{qty_str} x {price_str} (TVA {int(tva_rate)}%)'
@@ -2879,13 +3005,12 @@ class StockApp(MDApp):
                     saved_paid = to_decimal(details.get('amount', 0))
                 except:
                     pass
-            saved_timbre = to_decimal(payment_info.get('timbre', 0))
             pay_method = transaction_data.get('payment_method', '') or payment_info.get('method', '')
-            is_cash = any((k in str(pay_method).lower() for k in ['espèce', 'espece']))
-            final_timbre = saved_timbre
-            if doc_type_raw == 'FC' and is_cash and (saved_timbre == 0):
-                base = calc_total_ht + calc_total_tva
-                final_timbre = to_decimal(AppConstants.calculate_stamp_duty(base))
+            is_facture = doc_type_raw in ['FC', 'FF']
+            calc_totals = calculate_document_totals(items, include_stamp_duty=is_facture, payment_method=pay_method)
+            calc_total_ht = calc_totals['total_ht_final']
+            calc_total_tva = calc_totals['total_tva_final'] if is_facture else Decimal('0.00')
+            final_timbre = calc_totals['stamp_duty'] if is_facture else Decimal('0.00')
             if stored_total_amount > 0:
                 total_net = stored_total_amount
             else:
@@ -2914,7 +3039,7 @@ class StockApp(MDApp):
         y += 25
         draw.line([(margin + 100, y), (PAPER_WIDTH - margin - 100, y)], fill=(0, 0, 0), width=1)
         y += 15
-        y = draw_text_line('Merci de votre Fidélité !', y, font_med, 'center')
+        y = draw_text_line('Merci de votre Fidélité.', y, font_med, 'center')
         y += 120
         final_image = image.crop((0, 0, PAPER_WIDTH, y))
         return final_image
@@ -2975,20 +3100,9 @@ class StockApp(MDApp):
             return 0.0
 
     def calculate_cart_totals(self, cart_items, is_invoice_mode):
-        total_ht = Decimal('0.00')
-        total_tva = Decimal('0.00')
-        for item in cart_items:
-            try:
-                p = to_decimal(item.get('price', 0))
-                q = to_decimal(item.get('qty', 0))
-                t_rate = to_decimal(item.get('tva', 0)) if is_invoice_mode else Decimal('0.00')
-                line_ht = quantize_decimal(p * q)
-                line_tva = quantize_decimal(line_ht * (t_rate / Decimal('100')))
-                total_ht += line_ht
-                total_tva += line_tva
-            except (ValueError, TypeError):
-                continue
-        return (total_ht, total_tva)
+        totals = calculate_document_totals(items=cart_items, include_stamp_duty=False)
+        tva_final = totals['total_tva_final'] if is_invoice_mode else Decimal('0.00')
+        return (totals['total_ht_final'], tva_final)
 
     def load_local_entities(self, entity_type):
         if hasattr(self, 'mgmt_dialog') and self.mgmt_dialog and self.mgmt_dialog.parent:
@@ -3779,6 +3893,7 @@ class StockApp(MDApp):
 
     def show_add_edit_entity_dialog(self, entity=None):
         from kivy.core.clipboard import Clipboard
+        from kivy.clock import Clock
         is_edit = entity is not None
         title = 'Modifier la Fiche' if is_edit else 'Ajouter un Nouveau'
         val_name = entity.get('name', '') if is_edit else ''
@@ -3806,9 +3921,9 @@ class StockApp(MDApp):
         header_info.add_widget(MDLabel(text='Identité', bold=True, theme_text_color='Primary', font_style='Subtitle1'))
         card_info.add_widget(header_info)
         card_info.add_widget(MDBoxLayout(size_hint_y=None, height=dp(1), md_bg_color=(0.9, 0.9, 0.9, 1)))
-        f_name = SmartTextField(text=val_name, hint_text='Nom Complet / Raison Sociale *', required=True, icon_right='account')
+        self.f_entity_name = SmartTextField(text=val_name, hint_text='Nom Complet / Raison Sociale *', required=True, icon_right='account')
         f_activity = SmartTextField(text=val_activity, hint_text='Activité', icon_right='briefcase')
-        card_info.add_widget(f_name)
+        card_info.add_widget(self.f_entity_name)
         card_info.add_widget(f_activity)
         main_box.add_widget(card_info)
         card_contact = MDCard(orientation='vertical', radius=[12], padding=dp(15), spacing=dp(10), elevation=1, adaptive_height=True, md_bg_color=(0.96, 0.98, 1, 1))
@@ -3865,9 +3980,9 @@ class StockApp(MDApp):
         footer_box = MDBoxLayout(orientation='vertical', spacing=dp(10), adaptive_height=True, padding=[0, dp(10), 0, 0])
 
         def save(x):
-            name_val = f_name.get_value().strip()
+            name_val = self.f_entity_name.get_value().strip()
             if not name_val:
-                f_name.error = True
+                self.f_entity_name.error = True
                 self.notify('Le nom est obligatoire', 'error')
                 return
             cat_val = 'Détail'
@@ -3889,6 +4004,7 @@ class StockApp(MDApp):
         scroll.add_widget(main_box)
         self.ae_dialog = MDDialog(title=title, type='custom', content_cls=scroll, buttons=[], size_hint=(0.98, 0.96))
         self.ae_dialog.open()
+        Clock.schedule_once(lambda dt: setattr(self.f_entity_name, 'focus', True), 0.3)
 
     def show_price_cat_selector(self, text_field_instance):
         content = MDBoxLayout(orientation='vertical', spacing=10, size_hint_y=None, height=dp(160), padding=dp(10))
@@ -4508,10 +4624,10 @@ class StockApp(MDApp):
         is_invoice_mode = doc_type in ['FC', 'FF', 'FP']
         is_transfer = stock_f == 0 and fin_f == 0 and (doc_type in ['TR', 'TRANSFER'])
         should_hide_location = is_transfer or doc_type in ['FP', 'DP', 'PROFORMA', 'ORDER']
-        total_ht, total_tva = self.calculate_cart_totals(self.cart, is_invoice_mode)
-        timbre = Decimal('0.00')
-        total_ttc = total_ht + total_tva + timbre
-        total_ttc = quantize_decimal(total_ttc)
+        totals = calculate_document_totals(self.cart)
+        total_ht = totals['total_ht_final']
+        total_tva = totals['total_tva_final'] if is_invoice_mode else Decimal('0.00')
+        total_ttc = total_ht + total_tva
         items_count = len(self.cart)
         if hasattr(self, 'cart_toolbar'):
             self.cart_toolbar.title = f'Panier ({items_count})'
@@ -4715,7 +4831,6 @@ class StockApp(MDApp):
                 q = float(self.edit_qty_field.text or 0)
             except:
                 q = 0.0
-            p = 0.0
             if hasattr(self, 'edit_price_field'):
                 try:
                     p = float(self.edit_price_field.text or 0)
@@ -4723,14 +4838,16 @@ class StockApp(MDApp):
                     p = 0.0
             else:
                 p = float(item.get('price', 0))
-            tva = 0.0
             if hasattr(self, 'edit_tva_field'):
                 try:
                     tva = float(self.edit_tva_field.text or 0)
                 except:
                     tva = 0.0
-            line_ht = self._round_num(q * p)
-            total = self._round_num(line_ht * (1 + tva / 100.0))
+            else:
+                tva = 0.0
+            dummy_cart = [{'qty': q, 'price': p, 'tva': tva}]
+            totals = calculate_document_totals(dummy_cart)
+            total = totals['total_ht_final'] + (totals['total_tva_final'] if is_invoice else Decimal('0.00'))
             if not hide_price:
                 self.btn_save_edit.text = f'MODIFIER\n{total:.2f} DA'
             else:
@@ -4908,6 +5025,7 @@ class StockApp(MDApp):
 
     def show_manage_product_dialog(self, product, prefilled_barcode=None):
         try:
+            from kivy.clock import Clock
             self.temp_selected_image_path = None
             self.remove_image_order = False
             if product and product.get('name') == 'Autre Article':
@@ -5215,7 +5333,7 @@ class StockApp(MDApp):
                         if current_image and os.path.exists(current_image):
                             try:
                                 os.remove(current_image)
-                            except Exception as e:
+                            except:
                                 pass
                         final_img_path = ''
                     family_to_save = self.btn_select_family.text
@@ -5260,6 +5378,7 @@ class StockApp(MDApp):
                         self.search_field.text = ''
                     self.load_more_products(reset=True)
                     self.update_family_filter_ui()
+                    self.check_and_load_stats()
                     self.notify('Produit enregistré avec succès', 'success')
                 except ValueError as ve:
                     self.notify('Erreur de format numérique (Vérifiez les prix/stock)', 'error')
@@ -5292,6 +5411,7 @@ class StockApp(MDApp):
                         if hasattr(self, 'search_field') and self.search_field:
                             self.search_field.text = ''
                         self.load_more_products(reset=True)
+                        self.check_and_load_stats()
                         self.notify('Produit supprimé', 'success')
                     except Exception as e:
                         self.notify(f'Erreur: {e}', 'error')
@@ -5309,6 +5429,7 @@ class StockApp(MDApp):
             scroll.add_widget(main_box)
             self.dialog = MDDialog(title=title, type='custom', content_cls=scroll, buttons=[], size_hint=(0.95, 0.85))
             self.dialog.open()
+            Clock.schedule_once(lambda dt: setattr(self.field_name, 'focus', True), 0.3)
         except Exception as e:
             self.notify(f'Erreur UI: {e}', 'error')
             print(f'Error in show_manage_product_dialog: {e}')
@@ -5360,15 +5481,10 @@ class StockApp(MDApp):
             doc_type = doc_type_map.get(self.current_mode, 'BV')
             fin_f = AppConstants.FINANCIAL_FACTORS.get(doc_type, 0)
             is_invoice_mode = doc_type in ['FC', 'FF', 'FP']
-            total_decimal = Decimal('0.00')
-            for item in self.cart:
-                p = to_decimal(item.get('price', 0))
-                q = to_decimal(item.get('qty', 0))
-                tva = to_decimal(item.get('tva', 0)) if is_invoice_mode else Decimal('0.00')
-                line_ht = p * q
-                line_ttc = line_ht * (Decimal('1') + tva / Decimal('100'))
-                total_decimal += line_ttc
-            total_val = quantize_decimal(total_decimal)
+            totals = calculate_document_totals(self.cart)
+            total_ht = totals['total_ht_final']
+            total_tva = totals['total_tva_final'] if is_invoice_mode else Decimal('0.00')
+            total_val = total_ht + total_tva
             if self.lbl_cart_count:
                 self.lbl_cart_count.text = f'PANIER ({count})'
             if self.lbl_cart_total:
@@ -5655,6 +5771,17 @@ class StockApp(MDApp):
         content.add_widget(header_box)
         card_height = dp(125) if self.show_details else dp(90)
         total_card = MDCard(orientation='vertical', size_hint_y=None, height=card_height, radius=[10], md_bg_color=(0.95, 0.95, 0.95, 1), elevation=1, padding='5dp')
+
+        def fill_exact_amount(instance, touch):
+            if instance.collide_point(*touch.pos):
+                if hasattr(self, 'current_final_total'):
+                    exact_val = float(self.current_final_total)
+                    val_str = str(int(exact_val)) if exact_val.is_integer() else str(exact_val)
+                    self.txt_paid.text = val_str
+                    self._recalc_ui_totals()
+                return True
+            return False
+        total_card.bind(on_touch_down=fill_exact_amount)
         if self.show_details:
             details_box = MDBoxLayout(orientation='horizontal', size_hint_y=None, height=dp(25), padding=[dp(5), 0], spacing=dp(5))
             lbl_ht = MDLabel(text=f'HT: {float(self.temp_total_ht):.2f} DA', theme_text_color='Secondary', font_style='Caption', halign='left', bold=True, size_hint_x=0.33)
@@ -5726,26 +5853,26 @@ class StockApp(MDApp):
         self.pay_dialog.open()
 
     def _recalc_ui_totals(self):
-        base_ttc = to_decimal(self.temp_total_ht) + to_decimal(self.temp_total_tva)
-        base_ttc = quantize_decimal(base_ttc)
+        doc_type_map = {'sale': 'BV', 'purchase': 'BA', 'return_sale': 'RC', 'return_purchase': 'RF', 'transfer': 'TR', 'invoice_sale': 'FC', 'invoice_purchase': 'FF', 'proforma': 'FP', 'order_purchase': 'DP'}
+        doc_type = doc_type_map.get(self.current_mode, 'BV')
+        is_invoice_mode = doc_type in ['FC', 'FF', 'FP']
+        payment_method = ''
+        if hasattr(self, 'is_invoice_sale') and self.is_invoice_sale:
+            if hasattr(self, 'payment_methods') and hasattr(self, 'current_method_index'):
+                try:
+                    payment_method = self.payment_methods[self.current_method_index]['value']
+                except:
+                    payment_method = ''
+        totals = calculate_document_totals(self.cart, include_stamp_duty=doc_type in ['FC', 'FF'], payment_method=payment_method)
+        tva_to_apply = totals['total_tva_final'] if is_invoice_mode else Decimal('0.00')
+        base_ttc = totals['total_ht_final'] + tva_to_apply
         timbre = Decimal('0.00')
         has_timbre_label = hasattr(self, 'lbl_timbre') and self.lbl_timbre is not None
-        if hasattr(self, 'is_invoice_sale') and self.is_invoice_sale:
-            if hasattr(self, 'payment_methods') and self.payment_methods:
-                idx = getattr(self, 'current_method_index', 0)
-                if idx < len(self.payment_methods):
-                    selected_val = self.payment_methods[idx]['value']
-                    if selected_val == 'Espèce':
-                        t_val = AppConstants.calculate_stamp_duty(float(base_ttc))
-                        timbre = to_decimal(t_val)
-                        if has_timbre_label:
-                            self.lbl_timbre.text = f'Timbre: {timbre:.2f} DA'
-                            self.lbl_timbre.opacity = 1
-                    elif has_timbre_label:
-                        self.lbl_timbre.text = ''
-                        self.lbl_timbre.opacity = 0
-                elif has_timbre_label:
-                    self.lbl_timbre.opacity = 0
+        if totals['show_stamp_duty_widget'] and is_invoice_mode:
+            timbre = totals['stamp_duty']
+            if has_timbre_label:
+                self.lbl_timbre.text = f'Timbre: {timbre:.2f} DA'
+                self.lbl_timbre.opacity = 1
         elif has_timbre_label:
             self.lbl_timbre.text = ''
             self.lbl_timbre.opacity = 0
@@ -5818,17 +5945,11 @@ class StockApp(MDApp):
                 doc_type_map = {'sale': 'BV', 'purchase': 'BA', 'return_sale': 'RC', 'return_purchase': 'RF', 'transfer': 'TR', 'invoice_sale': 'FC', 'invoice_purchase': 'FF', 'proforma': 'FP', 'order_purchase': 'DP', 'client_payment': 'CLIENT_PAY', 'supplier_payment': 'SUPPLIER_PAY'}
                 doc_type = doc_type_map.get(self.current_mode, 'BV')
             is_invoice_mode = doc_type in ['FC', 'FF', 'FP']
-            ht_val, tva_val = self.calculate_cart_totals(self.cart, is_invoice_mode)
-            calc_ht = to_decimal(ht_val)
-            calc_tva = to_decimal(tva_val)
-            base_ttc = calc_ht + calc_tva
-            timbre_amount = Decimal('0.00')
-            should_apply_stamp = doc_type in AppConstants.APPLY_STAMP_DUTY
-            is_cash = 'Espèce' in (method or '')
-            if should_apply_stamp and is_cash:
-                t_val = AppConstants.calculate_stamp_duty(float(base_ttc))
-                timbre_amount = to_decimal(t_val)
-            real_total = quantize_decimal(base_ttc + timbre_amount)
+            calc_totals = calculate_document_totals(self.cart, include_stamp_duty=doc_type in ['FC', 'FF'], payment_method=method)
+            calc_ht = calc_totals['total_ht_final']
+            calc_tva = calc_totals['total_tva_final'] if is_invoice_mode else Decimal('0.00')
+            timbre_amount = calc_totals['stamp_duty'] if is_invoice_mode else Decimal('0.00')
+            real_total = quantize_decimal(calc_ht + calc_tva + timbre_amount)
             input_paid = to_decimal(paid_amount)
             inv_payment = input_paid
             excess = Decimal('0.00')
@@ -5837,6 +5958,10 @@ class StockApp(MDApp):
                 if input_paid > real_total:
                     inv_payment = real_total
                     excess = input_paid - real_total
+            elif fin_factor == -1 and doc_type in ['RC', 'RF']:
+                inv_payment = Decimal('0.00')
+                input_paid = Decimal('0.00')
+                excess = Decimal('0.00')
             ent_id = self.selected_entity['id'] if self.selected_entity else None
             payment_info = {'amount': float(inv_payment), 'total': float(real_total), 'method': method, 'timbre': float(timbre_amount)}
             data = {'doc_type': doc_type, 'items': self.cart, 'user_name': self.current_user_name, 'timestamp': timestamp, 'purchase_location': self.selected_location, 'entity_id': ent_id, 'payment_info': payment_info, 'is_simple_payment': False, 'amount': float(real_total)}
@@ -5882,7 +6007,7 @@ class StockApp(MDApp):
                 self.stat_supplier_payments = float(current_s_pay)
                 self.calculate_net_total()
                 self.save_local_stats()
-            self.notify('Enregistré avec succès', 'success')
+            self.notify('Enregistré مع succès', 'success')
             try:
                 if self.db.get_setting('printer_auto', 'False') == 'True' and self.db.get_setting('printer_mac', ''):
                     threading.Thread(target=self.print_ticket_bluetooth, args=(data,), daemon=True).start()
@@ -6095,13 +6220,24 @@ class StockApp(MDApp):
             if 'credit' in str(payment_method_val).lower() or 'crédit' in str(payment_method_val).lower():
                 payment_method_val = ''
             pdf.doc_info = {'date': date_str, 'doc_name_fr': doc_name_fr, 'doc_number': invoice_num, 'payment_method': pdf.smart_text(payment_method_val) if not is_transfer else '', 'order_number': trans.get('order_number', ''), 'doc_type': doc_type}
-            calc_ht_sum = Decimal(0)
-            calc_tva_sum = Decimal(0)
-            table_data = []
             printable_width = pdf.w - pdf.l_margin - pdf.r_margin
+            table_data = []
             if is_transfer:
                 headers = ['N°', 'Code', 'Désignation', 'Qté']
                 col_widths = [15, 35, 110, 30]
+                counter = 1
+                for item in items:
+                    qty = to_decimal(item['qty'])
+                    qty_disp = str(int(qty)) if qty == qty.to_integral_value() else str(float(qty))
+                    prod_ref_code = item.get('product_ref', '') or ''
+                    raw_name = item.get('product_name') or item.get('name') or 'Produit'
+                    full_name_disp = pdf.smart_text(raw_name)
+                    table_data.append([str(counter), prod_ref_code, full_name_disp, qty_disp])
+                    counter += 1
+                pdf.totals = {}
+                pdf.amount_in_words = ''
+                pdf.payment_info = {}
+                pdf.balance_data = None
             else:
                 is_bon = doc_type in ('BV', 'BA')
                 if is_bon:
@@ -6112,47 +6248,28 @@ class StockApp(MDApp):
                     col_widths = [10, 25, 0, 15, 25, 20, 15, 25]
                 fixed_width = sum([w for w in col_widths if w > 0])
                 col_widths[2] = max(20, printable_width - fixed_width)
-            counter = 1
-            for item in items:
-                qty = to_decimal(item['qty'])
-                qty_disp = str(int(qty)) if qty == qty.to_integral_value() else str(float(qty))
-                prod_ref_code = item.get('product_ref', '') or ''
-                raw_name = item.get('name', 'Produit') or item.get('product_name', 'Produit')
-                ref_text = item.get('reference', '')
-                full_name_disp = pdf.smart_text(raw_name)
-                if ref_text:
-                    full_name_disp += f' ({pdf.smart_text(ref_text)})'
-                if is_transfer:
-                    row = [str(counter), prod_ref_code, full_name_disp, qty_disp]
-                else:
+                is_facture = doc_type in ('FC', 'FF')
+                calc_totals = calculate_document_totals(items, include_stamp_duty=is_facture, payment_method=payment_method_val)
+                counter = 1
+                for item in items:
+                    qty = to_decimal(item['qty'])
+                    qty_disp = str(int(qty)) if qty == qty.to_integral_value() else str(float(qty))
+                    prod_ref_code = item.get('product_ref', '') or ''
+                    raw_name = item.get('product_name') or item.get('name') or 'Produit'
+                    full_name_disp = pdf.smart_text(raw_name)
                     price = to_decimal(item['price'])
                     tva_rate = to_decimal(item.get('tva', 0))
                     line_ht = qty * price
-                    calc_ht_sum += line_ht
-                    line_tva = line_ht * (tva_rate / Decimal(100))
-                    calc_tva_sum += line_tva
                     disc_amt = Decimal(0)
-                    is_bon = doc_type in ('BV', 'BA')
                     row = [str(counter), prod_ref_code, full_name_disp, qty_disp, format_number_simple(price), format_number_simple(disc_amt)]
                     if not is_bon:
                         row.append(f'{float(tva_rate):g}%')
                     row.append(format_number_simple(line_ht))
-                table_data.append(row)
-                counter += 1
-            if is_transfer:
-                pdf.totals = {}
-                pdf.amount_in_words = ''
-                pdf.payment_info = {}
-                pdf.balance_data = None
-            else:
-                stored_final_total = to_decimal(trans.get('total_amount', 0))
-                stored_discount = to_decimal(trans.get('discount', 0))
-                if timbre_val == 0 and doc_type == 'FC' and ('Espèce' in str(payment_method_val)):
-                    base_calc = calc_ht_sum + calc_tva_sum
-                    timbre_val = to_decimal(AppConstants.calculate_stamp_duty(base_calc))
-                pdf.totals = {'total_ht': calc_ht_sum, 'total_tva': calc_tva_sum, 'total_discount': stored_discount, 'stamp_duty': timbre_val if timbre_val > 0 else None, 'final_total': stored_final_total}
+                    table_data.append(row)
+                    counter += 1
+                pdf.totals = {'total_ht': calc_totals['total_ht_final'], 'total_tva': calc_totals['total_tva_final'] if is_facture else Decimal('0.00'), 'total_discount': calc_totals['total_all_discounts_final'], 'stamp_duty': calc_totals['stamp_duty'] if calc_totals['stamp_duty'] > 0 else None, 'final_total': calc_totals['final_total'] if is_facture else calc_totals['total_ht_final'] - calc_totals['total_all_discounts_final']}
                 try:
-                    pdf.amount_in_words = f'{number_to_words_fr(stored_final_total)} dinars algériens.'
+                    pdf.amount_in_words = f"{number_to_words_fr(pdf.totals['final_total'])} dinars algériens."
                 except:
                     pdf.amount_in_words = ''
                 pdf.payment_info = {'amount': paid_val}
@@ -6169,7 +6286,7 @@ class StockApp(MDApp):
                         cursor.execute(f'SELECT balance FROM {target_table} WHERE id = ?', (ent_id,))
                         row = cursor.fetchone()
                         current_balance_db = to_decimal(row[0]) if row else Decimal(0)
-                        transaction_effect = stored_final_total * fin_factor - paid_val
+                        transaction_effect = pdf.totals['final_total'] * fin_factor - paid_val
                         old_balance = current_balance_db - transaction_effect
                         balance_data = {'old_balance': old_balance, 'transaction_amount': transaction_effect, 'new_balance': current_balance_db}
                         conn.close()
@@ -6525,18 +6642,19 @@ class StockApp(MDApp):
         content.add_widget(scroll)
         actions = MDBoxLayout(orientation='vertical', spacing='10dp', adaptive_height=True, padding=[0, '15dp', 0, 0])
         top_row = MDBoxLayout(orientation='horizontal', spacing='10dp', size_hint_y=None, height='50dp')
-        btn_print = MDFillRoundFlatButton(text='IMPRIMER', md_bg_color=(0, 0.5, 0.8, 1), text_color=(1, 1, 1, 1), size_hint_x=0.33)
-        p_data = header_data.copy()
-        p_data['items'] = items
-        btn_print.bind(on_release=lambda x: threading.Thread(target=self.print_ticket_bluetooth, args=(p_data,), daemon=True).start())
-        top_row.add_widget(btn_print)
+        if doc_type not in ['FC', 'FF', 'FP']:
+            btn_print = MDFillRoundFlatButton(text='IMPRIMER', md_bg_color=(0, 0.5, 0.8, 1), text_color=(1, 1, 1, 1), size_hint_x=1)
+            p_data = header_data.copy()
+            p_data['items'] = items
+            btn_print.bind(on_release=lambda x: threading.Thread(target=self.print_ticket_bluetooth, args=(p_data,), daemon=True).start())
+            top_row.add_widget(btn_print)
         if doc_type not in ['CLIENT_PAY', 'SUPPLIER_PAY']:
-            btn_pdf = MDFillRoundFlatButton(text='PDF', md_bg_color=(0.8, 0.2, 0.2, 1), text_color=(1, 1, 1, 1), size_hint_x=0.33)
+            btn_pdf = MDFillRoundFlatButton(text='PDF', md_bg_color=(0.8, 0.2, 0.2, 1), text_color=(1, 1, 1, 1), size_hint_x=1)
             btn_pdf.bind(on_release=lambda x: self.generate_pdf_report(trans_id, doc_type))
             top_row.add_widget(btn_pdf)
         is_today = str(date_display).split(' ')[0] == str(datetime.now().date())
         if not self.is_seller_mode or is_today:
-            btn_edit = MDFillRoundFlatButton(text='MODIFIER', md_bg_color=(0, 0.6, 0.4, 1), text_color=(1, 1, 1, 1), size_hint_x=0.33)
+            btn_edit = MDFillRoundFlatButton(text='MODIFIER', md_bg_color=(0, 0.6, 0.4, 1), text_color=(1, 1, 1, 1), size_hint_x=1)
             btn_edit.bind(on_release=lambda x: self.load_transaction_for_edit(header_data, items))
             top_row.add_widget(btn_edit)
         actions.add_widget(top_row)
@@ -7426,8 +7544,11 @@ class StockApp(MDApp):
             msg += f' ({skipped} doublons)'
         self.notify(msg, 'success')
         self.load_more_products(reset=True)
+        self.check_and_load_stats()
 
     def bulk_insert_data(self, table, headers, data):
+        from datetime import datetime
+        import json
         conn = self.db.get_connection()
         cursor = conn.cursor()
         supplier_id = None
@@ -7456,6 +7577,21 @@ class StockApp(MDApp):
         current_date_obj = datetime.now()
         timestamp_base = str(current_date_obj).split('.')[0]
         date_part = current_date_obj.strftime('%d%m')
+        current_bi_seq = 0
+        try:
+            cursor.execute(f"SELECT custom_label FROM transactions WHERE custom_label LIKE 'BI%/{date_part}'")
+            for r in cursor.fetchall():
+                if r[0]:
+                    try:
+                        num_part = str(r[0]).upper().replace('BI', '').split('/')[0]
+                        if num_part.isdigit():
+                            v = int(num_part)
+                            if v > current_bi_seq:
+                                current_bi_seq = v
+                    except:
+                        pass
+        except:
+            pass
         try:
             conn.execute('BEGIN TRANSACTION')
             for row in data:
@@ -7490,18 +7626,11 @@ class StockApp(MDApp):
                 qty = float(row_list[4])
                 cost = float(row_list[3])
                 if qty > 0 and supplier_id:
-                    seq_name = 'SEQ_BI'
-                    cursor.execute('UPDATE document_sequences SET current_value = current_value + 1 WHERE name = ?', (seq_name,))
-                    if cursor.rowcount == 0:
-                        cursor.execute('INSERT INTO document_sequences (name, current_value) VALUES (?, ?)', (seq_name, 1))
-                        next_val = 1
-                    else:
-                        cursor.execute('SELECT current_value FROM document_sequences WHERE name = ?', (seq_name,))
-                        next_val = cursor.fetchone()[0]
-                    ref_number = f'BI{next_val:05d}/{date_part}'
+                    current_bi_seq += 1
+                    ref_number = f'BI{current_bi_seq:05d}/{date_part}'
                     total_amount = qty * cost
                     payment_json = json.dumps({'amount': total_amount, 'method': 'Initial', 'total': total_amount}, ensure_ascii=False)
-                    cursor.execute('\n                        INSERT INTO transactions \n                        (transaction_type, total_amount, date, entity_id, custom_label, user_name, note, payment_details, location) \n                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n                    ', ('BI', total_amount, timestamp_base, supplier_id, ref_number, self.current_user_name, f'Stock Init: {row_list[0]}', payment_json, 'store'))
+                    cursor.execute('\n                        INSERT INTO transactions \n                        (transaction_type, total_amount, date, entity_id, custom_label, user_name, note, payment_details, location) \n                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n                    ', ('BI', total_amount, timestamp_base, supplier_id, ref_number, getattr(self, 'current_user_name', 'ADMIN'), f'Stock Init: {row_list[0]}', payment_json, 'store'))
                     t_id = cursor.lastrowid
                     cursor.execute('\n                        INSERT INTO transaction_items \n                        (transaction_id, product_id, product_name, qty, price, tva, is_return, cost_price) \n                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)\n                    ', (t_id, new_product_id, row_list[0], qty, cost, 0, 0, cost))
             conn.commit()
@@ -7509,7 +7638,8 @@ class StockApp(MDApp):
         except Exception as e:
             conn.rollback()
             print(f'Import Error: {e}')
-            self.notify(f'Erreur Import: {e}', 'error')
+            if hasattr(self, 'notify'):
+                self.notify(f'Erreur Import: {e}', 'error')
             return (0, 0)
         finally:
             conn.close()
