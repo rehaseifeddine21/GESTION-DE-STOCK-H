@@ -82,6 +82,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
+      - name: Secure Source Code (PyArmor)
+        run: |
+          pip install pyarmor
+          pyarmor gen -O dist main.py
+          cp dist/main.py ./main.py
+
       - name: Build with Buildozer
         env:
           GRADLE_OPTS: "-Xmx4096m -Dorg.gradle.daemon=false"
