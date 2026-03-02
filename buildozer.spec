@@ -1,7 +1,7 @@
 [app]
 title = MagPro
-package.name = MagPro
-package.domain = org.magpro
+package.name = magPro
+package.domain = org.magpromobile
 source.dir = .
 source.include_exts = py,png,jpg,kv,atlas,json,ttf
 version = 7.1.1
