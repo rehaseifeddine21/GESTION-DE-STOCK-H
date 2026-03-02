@@ -1,4 +1,4 @@
-name: Build Android APK
+name: Build Android APK (Release)
 
 on:
   push:
@@ -82,14 +82,22 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Build with Buildozer
+      - name: Decode Keystore
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 --decode > ${{ github.workspace }}/magpro.keystore
+
+      - name: Build and Sign Release APK
         env:
           GRADLE_OPTS: "-Xmx4096m -Dorg.gradle.daemon=false"
+          P4A_RELEASE_KEYSTORE: ${{ github.workspace }}/magpro.keystore
+          P4A_RELEASE_KEYSTORE_PASSWD: ${{ secrets.KEYSTORE_PASSWORD }}
+          P4A_RELEASE_KEYALIAS: magpro
+          P4A_RELEASE_KEYALIAS_PASSWD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
-          yes | buildozer android debug
+          yes | buildozer android release
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: package
-          path: bin/*.apk
+          name: MagPro-Release-APK
+          path: bin/*-release.apk
