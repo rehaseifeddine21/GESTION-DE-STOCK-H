@@ -18,11 +18,10 @@ android.accept_sdk_license = True
 android.skip_update = False
 android.logcat_filters = *:S python:D
 android.archs = arm64-v8a
-android.release_artifact = apk
 android.add_compilation = True
 android.add_src = False
 android.allow_backup = True
-android.debug_artifact = apk
+android.release_artifact = apk
 android.manifest.application_attributes = android:usesCleartextTraffic="true"
 
 [buildozer]
