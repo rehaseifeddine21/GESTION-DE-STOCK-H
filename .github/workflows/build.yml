@@ -94,10 +94,13 @@ jobs:
           P4A_RELEASE_KEYALIAS: magpro
           P4A_RELEASE_KEYALIAS_PASSWD: ${{ secrets.KEYSTORE_PASSWORD }}
         run: |
+          sed -i '/android.release_artifact/d' buildozer.spec
+          echo "android.release_artifact = apk" >> buildozer.spec
+          
           yes | buildozer android release
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: MagPro-Release-APK
-          path: bin/*-release.apk
+          path: bin/*.apk
